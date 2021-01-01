@@ -137,7 +137,7 @@
       copy:
         src: wifi-power-save.service
         dest: /etc/systemd/system/wifi-power-save@.service
-    - name: enable service to disable powersave for wlan0
+    - name: enable service to disable powersave for wlan1
       systemd:
         name: wifi-power-save@off.service
         enabled: true
