@@ -1,0 +1,5 @@
+all:
+ hosts:
+  pi: 
+    ansible_user: pi
+    ansible_host: camp-kickass.local

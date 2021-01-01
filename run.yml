@@ -1,0 +1,178 @@
+---
+- name: create wifi extender
+  hosts: pi
+  remote_user: pi
+  become: yes
+  become_method: sudo
+
+  tasks:
+    - name: Install software
+      apt:
+        update_cache: yes
+        pkg: 
+          - hostapd
+          - dnsmasq
+          - iptables-persistent
+          - raspberrypi-kernel-headers
+          - build-essential
+          - bc
+          - dkms
+          - iw
+          - git
+        state: latest
+    - name: set hostname
+      shell: hostnamectl set-hostname camp-kickass
+    - name: copy hostapd conf
+      copy:
+        src: hostapd.conf
+        dest: /etc/hostapd/hostapd.conf
+    - name: copy hostapd conf
+      copy:
+        src: camp-kickass-dnsmasq.conf
+        dest: /etc/dnsmasq.d/camp-kickass.conf
+    - name: unblock wifi
+      shell: rfkill unblock wifi
+    - name: set wpa supplicant conf
+      copy:
+        src: wpa_supplicant.conf
+        dest: /etc/wpa_supplicant/wpa_supplicant.conf
+    - name: get dongle driver code
+      shell: rm -rf /opt/wifi-dongle-driver && git clone --branch realtek-4.4.x https://github.com/Mange/rtl8192eu-linux-driver.git /opt/wifi-dongle-driver
+    - name: disable 386 PC compilation in driver
+      lineinfile:
+        path: /opt/wifi-dongle-driver/Makefile
+        regexp: CONFIG_PLATFORM_I386_PC = y
+        line: CONFIG_PLATFORM_I386_PC = n
+        state: present
+    # for ubuntu arm use _ARM_AARCH64. With Raspbian we use _ARM_RPI
+    - name: enable ARM compilation in driver for Ubuntu
+      lineinfile:
+        path: /opt/wifi-dongle-driver/Makefile
+        regexp: CONFIG_PLATFORM_ARM_AARCH64 = n
+        line: CONFIG_PLATFORM_ARM_AARCH64 = y
+        state: present
+      when: ansible_facts['distribution'] == "Ubuntu"
+    - name: enable ARM compilation in driver for Raspbian
+      lineinfile:
+        path: /opt/wifi-dongle-driver/Makefile
+        regexp: CONFIG_PLATFORM_ARM_RPI = n
+        line: CONFIG_PLATFORM_ARM_RPI = y
+        state: present
+      when: ansible_facts['lsb']['id'] == "Raspbian"
+    - name: compile the wifi driver for ARM64
+      shell:
+        cmd: dkms add .
+        chdir: /opt/wifi-dongle-driver
+      ignore_errors: true
+    - name: install the wifi driver for ARM64
+      shell:
+        cmd: dkms install rtl8192eu/1.0
+        chdir: /opt/wifi-dongle-driver
+    - name: blacklist RTL8XXXU
+      lineinfile:
+        path: /etc/modprobe.d/blacklist-rtl8xxxu.conf
+        line: blacklist rtl8xxxu
+    - name: fix driver issues by disabling some options
+      blockinfile:
+        path: /etc/modprobe.d/8192eu.conf
+        create: true
+        content: |
+          options 8192eu rtw_power_mgnt=0 rtw_enusbss=0
+    - name: update grub and initramfs
+      shell: update-initramfs -u
+    - name: configure wireless interfaces ips
+      blockinfile:
+        path: /etc/dhcpcd.conf
+        content: |
+          interface wlan0
+          static ip_address=192.168.1.201/24
+          static routers=192.168.1.1
+          static domain_name_servers=192.168.1.1
+
+          interface wlan1
+          nohook wpa_supplicant
+          static ip_address=192.168.2.1/24
+          static domain_name_servers=192.168.2.1
+    - name: ACCEPT incoming traffic from wlan1 to wlan0 that is RELATED, ESTABLISHED
+      iptables:
+        chain: FORWARD
+        in_interface: wlan0
+        out_interface: wlan1
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+    - name: ACCEPT incoming traffic from wlan0 to wlan1 
+      iptables:
+        chain: FORWARD
+        in_interface: wlan1
+        out_interface: wlan0
+        jump: ACCEPT
+    - name: MASQUERADE traffic that leaves wlan0
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        out_interface: wlan0
+        jump: MASQUERADE
+    - name: FORWARD established and related traffic from eth0 to wlan1
+      iptables:
+        chain: FORWARD
+        in_interface: eth0
+        out_interface: wlan1
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+    - name: FORWARD traffic from wlan1 to eth0
+      iptables:
+        chain: FORWARD
+        in_interface: wlan1
+        out_interface: eth0
+        jump: ACCEPT
+    - name: MASQUERADE traffic that leaves eth0
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        out_interface: eth0
+        jump: MASQUERADE
+    - name: Persist the iptable rules
+      shell: netfilter-persistent save
+    - name: service to disable powersave on wlan0
+      copy:
+        src: wifi-power-save.service
+        dest: /etc/systemd/system/wifi-power-save@.service
+    - name: enable service to disable powersave for wlan0
+      systemd:
+        name: wifi-power-save@off.service
+        enabled: true
+    - name: enable ip4 forwarding
+      lineinfile: 
+        path: /etc/sysctl.conf
+        regexp: net.ipv4.ip_forward=0
+        line: net.ipv4.ip_forward=1
+        state: present
+    - name: activate iptables persistent
+      systemd:
+        name: netfilter-persistent
+        enabled: true
+        state: started
+    - name: activate hostapd
+      systemd:
+        name: hostapd
+        masked: false
+        enabled: true
+        state: started
+    - name: ensure dnsmasq service dropin directory exists
+      file:
+        path: /etc/systemd/system/dnsmasq.service.d
+        state: directory
+    - name: copy dnsmasq service override into service drop in
+      copy:
+        src: dnsmasq-override.service
+        dest: /etc/systemd/system/dnsmasq.service.d/override.conf
+    - name: reload systemd configs
+      systemd:
+        daemon_reload: true
+    - name: activate dnsmasq
+      systemd:
+        name: dnsmasq
+        enabled: true
+        state: started
+    - name: reboot the pi!
+      reboot:
