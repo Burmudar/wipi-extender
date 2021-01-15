@@ -1,3 +1,7 @@
 [Unit]
-Requires=hostapd.service
-After=hostapd.service
+Requires=hostapd.service network-online.target
+After=hostapd.service network-online.target
+
+[Service]
+Restart=on-failure
+RestartSec=5s
